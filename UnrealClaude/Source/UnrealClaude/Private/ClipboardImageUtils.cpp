@@ -61,9 +61,12 @@ bool FClipboardImageUtils::ClipboardHasImage()
 	int32 ReturnCode = -1;
 	FString StdOut, StdErr;
 
-	if (FPlatformProcess::ExecProcess(TEXT("/bin/sh"), TEXT("-c 'osascript -e \"clipboard info\" 2>/dev/null'"), &ReturnCode, &StdOut, &StdErr) && ReturnCode == 0)
+	// Call osascript directly — /bin/sh wrapper mangles quote parsing on macOS
+	if (FPlatformProcess::ExecProcess(TEXT("/usr/bin/osascript"), TEXT("-e \"clipboard info\""), &ReturnCode, &StdOut, &StdErr) && ReturnCode == 0)
 	{
-		if (StdOut.Contains(TEXT("«class PNGf»")) || StdOut.Contains(TEXT("«class TIFF»")))
+		// Match on ASCII-safe substrings — osascript output uses guillemets (e.g. «class PNGf»)
+		// which have encoding issues in TEXT() macros, so we match the class name only
+		if (StdOut.Contains(TEXT("PNGf")) || StdOut.Contains(TEXT("TIFF")))
 		{
 			return true;
 		}
@@ -267,10 +270,12 @@ bool FClipboardImageUtils::SaveClipboardImageToFile(FString& OutFilePath, const 
 	return false;
 
 #elif PLATFORM_MAC
-	// On macOS, use osascript to save clipboard image as PNG
+	// On macOS, write an AppleScript to a temp file and run it via osascript.
+	// The guillemet characters (« ») in AppleScript class references have encoding
+	// issues in C++ TEXT() macros, so we write raw UTF-8 bytes to a script file.
 
 	// Convert to absolute path - FPaths::ProjectSavedDir() returns a relative path on macOS
-	// that UE resolves internally, but osascript needs the full POSIX path
+	// that UE resolves internally, but external processes need the full POSIX path
 	FString AbsSaveDirectory = FPaths::ConvertRelativePathToFull(SaveDirectory);
 
 	// Ensure directory exists
@@ -287,22 +292,41 @@ bool FClipboardImageUtils::SaveClipboardImageToFile(FString& OutFilePath, const 
 	int32 ReturnCode = -1;
 	FString StdOut, StdErr;
 
-	// Use osascript to read clipboard image as PNG and write to file
-	FString OsascriptCmd = FString::Printf(
-		TEXT("-c 'osascript -e \"set theImage to the clipboard as «class PNGf»\" "
-			"-e \"set theFile to open for access POSIX file \\\"%s\\\" with write permission\" "
-			"-e \"write theImage to theFile\" "
-			"-e \"close access theFile\" 2>/dev/null'"),
-		*OutFilePath);
+	UE_LOG(LogUnrealClaude, Log, TEXT("SaveClipboardImage: saving to %s"), *OutFilePath);
 
-	if (FPlatformProcess::ExecProcess(TEXT("/bin/sh"), *OsascriptCmd, &ReturnCode, &StdOut, &StdErr) && ReturnCode == 0)
+	// Write AppleScript to a temp file as raw UTF-8 bytes.
+	// We CANNOT use FString/TEXT() for the guillemet characters (« ») because TCHAR is wchar_t
+	// on macOS (4 bytes), so \xC2\xAB in TEXT() creates two separate wide chars that get
+	// double-encoded when saved as UTF-8. Using narrow char* with \xC2\xAB is correct UTF-8.
+	FString ScriptPath = FPaths::Combine(AbsSaveDirectory, TEXT("_clipboard_save.applescript"));
+
+	char ScriptBuf[2048];
+	int32 ScriptLen = FCStringAnsi::Snprintf(ScriptBuf, sizeof(ScriptBuf),
+		"set theImage to the clipboard as \xC2\xAB" "class PNGf\xC2\xBB\n"
+		"set theFile to open for access POSIX file \"%s\" with write permission\n"
+		"write theImage to theFile\n"
+		"close access theFile\n",
+		TCHAR_TO_UTF8(*OutFilePath));
+
+	TArray<uint8> ScriptBytes;
+	ScriptBytes.Append(reinterpret_cast<const uint8*>(ScriptBuf), ScriptLen);
+
+	if (FFileHelper::SaveArrayToFile(ScriptBytes, *ScriptPath))
 	{
-		if (IFileManager::Get().FileExists(*OutFilePath) && IFileManager::Get().FileSize(*OutFilePath) > 0)
+		// Call osascript directly on the script file — no shell wrapper needed
+		if (FPlatformProcess::ExecProcess(TEXT("/usr/bin/osascript"), *ScriptPath, &ReturnCode, &StdOut, &StdErr) && ReturnCode == 0)
 		{
-			UE_LOG(LogUnrealClaude, Log, TEXT("Saved clipboard image via osascript: %s (%lld bytes)"),
-				*OutFilePath, IFileManager::Get().FileSize(*OutFilePath));
-			return true;
+			IFileManager::Get().Delete(*ScriptPath);
+			if (IFileManager::Get().FileExists(*OutFilePath) && IFileManager::Get().FileSize(*OutFilePath) > 0)
+			{
+				UE_LOG(LogUnrealClaude, Log, TEXT("Saved clipboard image via osascript: %s (%lld bytes)"),
+					*OutFilePath, IFileManager::Get().FileSize(*OutFilePath));
+				return true;
+			}
 		}
+		UE_LOG(LogUnrealClaude, Warning, TEXT("SaveClipboardImage: osascript failed (ReturnCode=%d, StdErr='%s')"),
+			ReturnCode, *StdErr);
+		IFileManager::Get().Delete(*ScriptPath);
 	}
 
 	// Clean up empty/failed file
@@ -311,7 +335,7 @@ bool FClipboardImageUtils::SaveClipboardImageToFile(FString& OutFilePath, const 
 		IFileManager::Get().Delete(*OutFilePath);
 	}
 
-	UE_LOG(LogUnrealClaude, Warning, TEXT("Failed to get clipboard image via osascript"));
+	UE_LOG(LogUnrealClaude, Warning, TEXT("Failed to get clipboard image on macOS"));
 	return false;
 
 #else

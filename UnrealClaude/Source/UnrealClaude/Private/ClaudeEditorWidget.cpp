@@ -250,13 +250,27 @@ TSharedRef<SWidget> SClaudeEditorWidget::BuildStatusBar()
 				SNullWidget::NullWidget
 			]
 			
-			// Project path
+			// Project path (convert to absolute and shorten home dir to ~/)
 			+ SHorizontalBox::Slot()
 			.AutoWidth()
 			.VAlign(VAlign_Center)
 			[
 				SNew(STextBlock)
-				.Text(FText::FromString(FPaths::GetProjectFilePath()))
+				.Text_Lambda([]() -> FText {
+					FString ProjectPath = FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath());
+					FString HomeDir = FPlatformProcess::UserHomeDir();
+					// Normalize: strip any trailing slashes so the replacement is consistent
+					// regardless of whether UserHomeDir() returns "/Users/x" or "/Users/x/"
+					while (HomeDir.EndsWith(TEXT("/")))
+					{
+						HomeDir.LeftChopInline(1);
+					}
+					if (ProjectPath.StartsWith(HomeDir))
+					{
+						ProjectPath = TEXT("~") + ProjectPath.RightChop(HomeDir.Len());
+					}
+					return FText::FromString(ProjectPath);
+				})
 				.TextStyle(FAppStyle::Get(), "SmallText")
 				.ColorAndOpacity(FSlateColor(FLinearColor(0.5f, 0.5f, 0.5f)))
 			]
