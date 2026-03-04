@@ -56,6 +56,20 @@ bool FClipboardImageUtils::ClipboardHasImage()
 	}
 
 	return false;
+#elif PLATFORM_MAC
+	// Check if clipboard contains image data using osascript
+	int32 ReturnCode = -1;
+	FString StdOut, StdErr;
+
+	if (FPlatformProcess::ExecProcess(TEXT("/bin/sh"), TEXT("-c 'osascript -e \"clipboard info\" 2>/dev/null'"), &ReturnCode, &StdOut, &StdErr) && ReturnCode == 0)
+	{
+		if (StdOut.Contains(TEXT("«class PNGf»")) || StdOut.Contains(TEXT("«class TIFF»")))
+		{
+			return true;
+		}
+	}
+
+	return false;
 #else
 	return false;
 #endif
@@ -250,6 +264,50 @@ bool FClipboardImageUtils::SaveClipboardImageToFile(FString& OutFilePath, const 
 	}
 
 	UE_LOG(LogUnrealClaude, Warning, TEXT("Failed to get clipboard image. Install wl-paste (wl-clipboard) or xclip."));
+	return false;
+
+#elif PLATFORM_MAC
+	// On macOS, use osascript to save clipboard image as PNG
+
+	// Ensure directory exists
+	IFileManager::Get().MakeDirectory(*SaveDirectory, true);
+
+	// Generate filename with timestamp
+	FDateTime Now = FDateTime::Now();
+	FString FileName = FString::Printf(TEXT("clipboard_%04d%02d%02d_%02d%02d%02d.png"),
+		Now.GetYear(), Now.GetMonth(), Now.GetDay(),
+		Now.GetHour(), Now.GetMinute(), Now.GetSecond());
+
+	OutFilePath = FPaths::Combine(SaveDirectory, FileName);
+
+	int32 ReturnCode = -1;
+	FString StdOut, StdErr;
+
+	// Use osascript to read clipboard image as PNG and write to file
+	FString OsascriptCmd = FString::Printf(
+		TEXT("-c 'osascript -e \"set theImage to the clipboard as «class PNGf»\" "
+			"-e \"set theFile to open for access POSIX file \\\"%s\\\" with write permission\" "
+			"-e \"write theImage to theFile\" "
+			"-e \"close access theFile\" 2>/dev/null'"),
+		*OutFilePath);
+
+	if (FPlatformProcess::ExecProcess(TEXT("/bin/sh"), *OsascriptCmd, &ReturnCode, &StdOut, &StdErr) && ReturnCode == 0)
+	{
+		if (IFileManager::Get().FileExists(*OutFilePath) && IFileManager::Get().FileSize(*OutFilePath) > 0)
+		{
+			UE_LOG(LogUnrealClaude, Log, TEXT("Saved clipboard image via osascript: %s (%lld bytes)"),
+				*OutFilePath, IFileManager::Get().FileSize(*OutFilePath));
+			return true;
+		}
+	}
+
+	// Clean up empty/failed file
+	if (IFileManager::Get().FileExists(*OutFilePath))
+	{
+		IFileManager::Get().Delete(*OutFilePath);
+	}
+
+	UE_LOG(LogUnrealClaude, Warning, TEXT("Failed to get clipboard image via osascript"));
 	return false;
 
 #else
