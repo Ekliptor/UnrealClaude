@@ -358,17 +358,75 @@ FMCPToolResult FMCPTool_BlueprintQuery::ExecuteGetGraph(const TSharedRef<FJsonOb
 
 FMCPToolResult FMCPTool_BlueprintQuery::ExecuteGetNodes(const TSharedRef<FJsonObject>& Params)
 {
-	return FMCPToolResult::Error(TEXT("get_nodes: Not yet implemented"));
+	UBlueprint* Blueprint = LoadAndValidateBlueprint(Params);
+	if (!Blueprint) return LastError;
+
+	FString GraphName = ExtractOptionalString(Params, TEXT("graph_name"));
+	int32 Limit = FMath::Clamp(ExtractOptionalNumber<int32>(Params, TEXT("limit"), 100), 1, 1000);
+
+	TArray<UEdGraph*> TargetGraphs = CollectGraphs(Blueprint, GraphName);
+	if (TargetGraphs.Num() == 0 && !GraphName.IsEmpty())
+	{
+		return FMCPToolResult::Error(FString::Printf(TEXT("Graph '%s' not found"), *GraphName));
+	}
+
+	TArray<TSharedPtr<FJsonValue>> NodesArray;
+	int32 TotalNodes = 0;
+
+	for (UEdGraph* Graph : TargetGraphs)
+	{
+		if (!Graph) continue;
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (!Node) continue;
+			TotalNodes++;
+			if (NodesArray.Num() >= Limit) continue;
+
+			TSharedPtr<FJsonObject> NodeObj = FBlueprintGraphEditor::SerializeNodeInfo(Node);
+			NodeObj->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+			NodeObj->SetStringField(TEXT("node_guid"), Node->NodeGuid.ToString());
+			NodeObj->SetStringField(TEXT("graph"), Graph->GetName());
+			NodesArray.Add(MakeShared<FJsonValueObject>(NodeObj));
+		}
+	}
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetArrayField(TEXT("nodes"), NodesArray);
+	Result->SetNumberField(TEXT("count"), NodesArray.Num());
+	Result->SetNumberField(TEXT("total"), TotalNodes);
+
+	return FMCPToolResult::Success(
+		FString::Printf(TEXT("Found %d nodes (showing %d)"), TotalNodes, NodesArray.Num()), Result);
 }
 
 FMCPToolResult FMCPTool_BlueprintQuery::ExecuteGetVariables(const TSharedRef<FJsonObject>& Params)
 {
-	return FMCPToolResult::Error(TEXT("get_variables: Not yet implemented"));
+	UBlueprint* Blueprint = LoadAndValidateBlueprint(Params);
+	if (!Blueprint) return LastError;
+
+	TArray<TSharedPtr<FJsonValue>> Variables = FBlueprintUtils::GetBlueprintVariables(Blueprint);
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetArrayField(TEXT("variables"), Variables);
+	Result->SetNumberField(TEXT("count"), Variables.Num());
+
+	return FMCPToolResult::Success(
+		FString::Printf(TEXT("Found %d variables"), Variables.Num()), Result);
 }
 
 FMCPToolResult FMCPTool_BlueprintQuery::ExecuteGetFunctions(const TSharedRef<FJsonObject>& Params)
 {
-	return FMCPToolResult::Error(TEXT("get_functions: Not yet implemented"));
+	UBlueprint* Blueprint = LoadAndValidateBlueprint(Params);
+	if (!Blueprint) return LastError;
+
+	TArray<TSharedPtr<FJsonValue>> Functions = FBlueprintUtils::GetBlueprintFunctions(Blueprint);
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetArrayField(TEXT("functions"), Functions);
+	Result->SetNumberField(TEXT("count"), Functions.Num());
+
+	return FMCPToolResult::Success(
+		FString::Printf(TEXT("Found %d functions/events"), Functions.Num()), Result);
 }
 
 FMCPToolResult FMCPTool_BlueprintQuery::ExecuteGetNodePins(const TSharedRef<FJsonObject>& Params)
