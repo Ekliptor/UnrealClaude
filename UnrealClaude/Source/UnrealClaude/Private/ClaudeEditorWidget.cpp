@@ -745,6 +745,11 @@ void SClaudeEditorWidget::OnClaudeStreamEvent(const FClaudeStreamEvent& Event)
 		HandleResultEvent(Event);
 		break;
 
+	case EClaudeStreamEventType::Refusal:
+		UE_LOG(LogUnrealClaude, Warning, TEXT("[StreamEvent] Refusal: stop_reason=%s"), *Event.StopReason);
+		HandleRefusalEvent(Event);
+		break;
+
 	default:
 		UE_LOG(LogUnrealClaude, Log, TEXT("[StreamEvent] Unknown type: %d"), static_cast<int32>(Event.Type));
 		break;
@@ -1054,6 +1059,42 @@ void SClaudeEditorWidget::HandleResultEvent(const FClaudeStreamEvent& Event)
 		.TextStyle(FAppStyle::Get(), "SmallText")
 		.ColorAndOpacity(FSlateColor(FLinearColor(0.4f, 0.4f, 0.45f)))
 	];
+
+	if (ChatScrollBox.IsValid())
+	{
+		ChatScrollBox->ScrollToEnd();
+	}
+}
+
+void SClaudeEditorWidget::HandleRefusalEvent(const FClaudeStreamEvent& Event)
+{
+	if (!StreamingContentBox.IsValid())
+	{
+		return;
+	}
+
+	// Display a refusal notice in the streaming content box
+	FString RefusalMessage = TEXT("Response refused by content safety filter. The conversation context has been reset.");
+
+	StreamingContentBox->AddSlot()
+	.AutoHeight()
+	.Padding(0, 8, 0, 4)
+	[
+		SNew(SBorder)
+		.BorderImage(FAppStyle::GetBrush("ToolPanel.DarkGroupBorder"))
+		.BorderBackgroundColor(FLinearColor(0.3f, 0.08f, 0.08f, 1.0f))
+		.Padding(FMargin(10.0f, 8.0f))
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(RefusalMessage))
+			.TextStyle(FAppStyle::Get(), "SmallText")
+			.ColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.5f, 0.5f)))
+			.AutoWrapText(true)
+		]
+	];
+
+	// Reset conversation context as required by the API docs
+	FClaudeCodeSubsystem::Get().ClearHistory();
 
 	if (ChatScrollBox.IsValid())
 	{

@@ -582,6 +582,42 @@ FString FClaudeCodeRunner::ParseStreamJsonOutput(const FString& RawOutput)
 		}
 	}
 
+	// Check for refusal in assistant messages
+	for (const FString& Line : Lines)
+	{
+		if (Line.IsEmpty())
+		{
+			continue;
+		}
+
+		TSharedPtr<FJsonObject> JsonObj;
+		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Line);
+		if (!FJsonSerializer::Deserialize(Reader, JsonObj) || !JsonObj.IsValid())
+		{
+			continue;
+		}
+
+		FString Type;
+		if (!JsonObj->TryGetStringField(TEXT("type"), Type))
+		{
+			continue;
+		}
+
+		if (Type == TEXT("assistant"))
+		{
+			const TSharedPtr<FJsonObject>* MessageObj;
+			if (JsonObj->TryGetObjectField(TEXT("message"), MessageObj))
+			{
+				FString StopReason;
+				if ((*MessageObj)->TryGetStringField(TEXT("stop_reason"), StopReason) && StopReason == TEXT("refusal"))
+				{
+					UE_LOG(LogUnrealClaude, Warning, TEXT("ParseStreamJsonOutput: Detected refusal (stop_reason=refusal)"));
+					return TEXT("Error: Response refused by content safety filter. Please rephrase your request.");
+				}
+			}
+		}
+	}
+
 	// Fallback: accumulate text from assistant content blocks
 	FString AccumulatedText;
 	for (const FString& Line : Lines)
@@ -700,6 +736,28 @@ void FClaudeCodeRunner::ParseAndEmitNdjsonLine(const FString& JsonLine)
 		{
 			UE_LOG(LogUnrealClaude, Warning, TEXT("NDJSON: assistant message missing 'message' field"));
 			return;
+		}
+
+		// Check for stop_reason: "refusal" - streaming classifiers intervened
+		FString StopReason;
+		(*MessageObj)->TryGetStringField(TEXT("stop_reason"), StopReason);
+		if (StopReason == TEXT("refusal"))
+		{
+			UE_LOG(LogUnrealClaude, Warning, TEXT("NDJSON: Streaming refusal detected (stop_reason=refusal)"));
+
+			if (CurrentConfig.OnStreamEvent.IsBound())
+			{
+				FClaudeStreamEvent Event;
+				Event.Type = EClaudeStreamEventType::Refusal;
+				Event.StopReason = StopReason;
+				Event.bIsError = true;
+				Event.RawJson = JsonLine;
+				FOnClaudeStreamEvent EventDelegate = CurrentConfig.OnStreamEvent;
+				AsyncTask(ENamedThreads::GameThread, [EventDelegate, Event]()
+				{
+					EventDelegate.ExecuteIfBound(Event);
+				});
+			}
 		}
 
 		const TArray<TSharedPtr<FJsonValue>>* ContentArray;
@@ -895,14 +953,39 @@ void FClaudeCodeRunner::ParseAndEmitNdjsonLine(const FString& JsonLine)
 		double TotalCostUsd = 0.0;
 		JsonObj->TryGetNumberField(TEXT("total_cost_usd"), TotalCostUsd);
 
-		UE_LOG(LogUnrealClaude, Log, TEXT("NDJSON Result: subtype=%s, is_error=%d, duration=%.0fms, turns=%.0f, cost=$%.4f, result=%d chars"),
-			*Subtype, bIsError, DurationMs, NumTurns, TotalCostUsd, ResultText.Len());
+		// Check for stop_reason in the result event
+		FString StopReason;
+		JsonObj->TryGetStringField(TEXT("stop_reason"), StopReason);
+
+		UE_LOG(LogUnrealClaude, Log, TEXT("NDJSON Result: subtype=%s, is_error=%d, stop_reason=%s, duration=%.0fms, turns=%.0f, cost=$%.4f, result=%d chars"),
+			*Subtype, bIsError, *StopReason, DurationMs, NumTurns, TotalCostUsd, ResultText.Len());
+
+		// If the result carries a refusal stop_reason, emit a Refusal event first
+		if (StopReason == TEXT("refusal"))
+		{
+			UE_LOG(LogUnrealClaude, Warning, TEXT("NDJSON: Refusal detected in result event (stop_reason=refusal)"));
+
+			if (CurrentConfig.OnStreamEvent.IsBound())
+			{
+				FClaudeStreamEvent RefusalEvent;
+				RefusalEvent.Type = EClaudeStreamEventType::Refusal;
+				RefusalEvent.StopReason = StopReason;
+				RefusalEvent.bIsError = true;
+				RefusalEvent.RawJson = JsonLine;
+				FOnClaudeStreamEvent EventDelegate = CurrentConfig.OnStreamEvent;
+				AsyncTask(ENamedThreads::GameThread, [EventDelegate, RefusalEvent]()
+				{
+					EventDelegate.ExecuteIfBound(RefusalEvent);
+				});
+			}
+		}
 
 		if (CurrentConfig.OnStreamEvent.IsBound())
 		{
 			FClaudeStreamEvent Event;
 			Event.Type = EClaudeStreamEventType::Result;
 			Event.ResultText = ResultText;
+			Event.StopReason = StopReason;
 			Event.bIsError = bIsError;
 			Event.DurationMs = static_cast<int32>(DurationMs);
 			Event.NumTurns = static_cast<int32>(NumTurns);
