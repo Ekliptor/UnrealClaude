@@ -1074,7 +1074,7 @@ void SClaudeEditorWidget::HandleRefusalEvent(const FClaudeStreamEvent& Event)
 	}
 
 	// Display a refusal notice in the streaming content box
-	FString RefusalMessage = TEXT("Response refused by content safety filter. The conversation context has been reset.");
+	FString RefusalMessage = TEXT("Response refused by content safety filter. Please rephrase your request.");
 
 	StreamingContentBox->AddSlot()
 	.AutoHeight()
@@ -1093,8 +1093,9 @@ void SClaudeEditorWidget::HandleRefusalEvent(const FClaudeStreamEvent& Event)
 		]
 	];
 
-	// Reset conversation context as required by the API docs
-	FClaudeCodeSubsystem::Get().ClearHistory();
+	// The refused turn is prevented from being saved to history because
+	// bRefusalDetected causes bSuccess=false in the completion callback,
+	// which skips AddExchange. No need to clear prior valid history.
 
 	if (ChatScrollBox.IsValid())
 	{
