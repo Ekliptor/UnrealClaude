@@ -114,6 +114,34 @@ public:
 		int32 TaskQueueRunning,
 		int32 TaskQueueCompleted);
 
+#if WITH_DEV_AUTOMATION_TESTS
+	/** Test-only: set the last-activity timestamp directly in FPlatformTime::Seconds() units. */
+	void TestOnly_SetLastActivityPlatformSeconds(double PlatformSeconds)
+	{
+		LastPipeActivityMillis.Store(static_cast<int64>(PlatformSeconds * 1000.0));
+	}
+
+	/** Test-only: reset both watchdog latches as if a fresh subprocess were launched. */
+	void TestOnly_ResetWatchdogLatches()
+	{
+		bSilenceBannerLatched.Store(false);
+		bHangDiagnosticLogged.Store(false);
+		LastPipeActivityMillis.Store(static_cast<int64>(FPlatformTime::Seconds() * 1000.0));
+	}
+
+	/** Test-only: expose the private RecordPipeActivity for latch-rearm tests. */
+	void TestOnly_CallRecordPipeActivity()
+	{
+		RecordPipeActivity();
+	}
+
+	/** Test-only: expose MaybeFireSilenceWatchdog. */
+	bool TestOnly_MaybeFireSilenceWatchdog(double NowPlatformSeconds)
+	{
+		return MaybeFireSilenceWatchdog(NowPlatformSeconds);
+	}
+#endif
+
 private:
 
 	// Process handle (FProcHandle stored as void* for atomic exchange compatibility)

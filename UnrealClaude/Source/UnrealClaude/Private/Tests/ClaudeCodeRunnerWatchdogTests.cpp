@@ -83,4 +83,107 @@ bool FClaudeCodeRunner_BuildHangDiagnostic_HandlesEmptyPayload::RunTest(const FS
 	return true;
 }
 
+// Helper: a runner instance we can poke directly. The tests bypass the worker
+// thread entirely — they just exercise the latch logic by setting the atomic
+// timestamp to known past values and calling the watchdog method.
+namespace
+{
+	/** Set the runner's last-activity time to N seconds in the past. */
+	static void SetRunnerSilenceSeconds(FClaudeCodeRunner& Runner, double SilenceSec)
+	{
+		Runner.TestOnly_SetLastActivityPlatformSeconds(FPlatformTime::Seconds() - SilenceSec);
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FClaudeCodeRunner_Watchdog_NoFireBelowThreshold,
+	"UnrealClaude.SilenceWatchdog.Watchdog.NoFireBelowThreshold",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter
+)
+
+bool FClaudeCodeRunner_Watchdog_NoFireBelowThreshold::RunTest(const FString& Parameters)
+{
+	FClaudeCodeRunner Runner;
+	Runner.TestOnly_ResetWatchdogLatches();
+	SetRunnerSilenceSeconds(Runner, 30.0); // below 60s threshold
+
+	const bool bFired = Runner.TestOnly_MaybeFireSilenceWatchdog(FPlatformTime::Seconds());
+
+	TestFalse(TEXT("Diagnostic not fired below threshold"), bFired);
+	TestFalse(TEXT("Banner not latched below threshold"), Runner.IsSilenceWarningActive());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FClaudeCodeRunner_Watchdog_FiresOnceAboveThreshold,
+	"UnrealClaude.SilenceWatchdog.Watchdog.FiresOnceAboveThreshold",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter
+)
+
+bool FClaudeCodeRunner_Watchdog_FiresOnceAboveThreshold::RunTest(const FString& Parameters)
+{
+	FClaudeCodeRunner Runner;
+	Runner.TestOnly_ResetWatchdogLatches();
+	SetRunnerSilenceSeconds(Runner, 75.0); // above 60s threshold
+
+	const bool bFired1 = Runner.TestOnly_MaybeFireSilenceWatchdog(FPlatformTime::Seconds());
+	const bool bFired2 = Runner.TestOnly_MaybeFireSilenceWatchdog(FPlatformTime::Seconds());
+
+	TestTrue(TEXT("Diagnostic fires first crossing"), bFired1);
+	TestFalse(TEXT("Diagnostic does not refire on second call (one-shot)"), bFired2);
+	TestTrue(TEXT("Banner latched after firing"), Runner.IsSilenceWarningActive());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FClaudeCodeRunner_Watchdog_BannerRearmsAfterActivity,
+	"UnrealClaude.SilenceWatchdog.Watchdog.BannerRearmsAfterActivity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter
+)
+
+bool FClaudeCodeRunner_Watchdog_BannerRearmsAfterActivity::RunTest(const FString& Parameters)
+{
+	FClaudeCodeRunner Runner;
+	Runner.TestOnly_ResetWatchdogLatches();
+
+	// First silence spell: latch banner
+	SetRunnerSilenceSeconds(Runner, 75.0);
+	Runner.TestOnly_MaybeFireSilenceWatchdog(FPlatformTime::Seconds());
+	TestTrue(TEXT("Banner latched"), Runner.IsSilenceWarningActive());
+
+	// Activity arrives → banner clears, diagnostic latch STAYS set
+	Runner.TestOnly_CallRecordPipeActivity();
+	TestFalse(TEXT("Banner clears on activity"), Runner.IsSilenceWarningActive());
+
+	// Second silence spell: banner relatches, diagnostic does NOT fire again
+	SetRunnerSilenceSeconds(Runner, 75.0);
+	const bool bFired2 = Runner.TestOnly_MaybeFireSilenceWatchdog(FPlatformTime::Seconds());
+	TestFalse(TEXT("Diagnostic stays one-shot across rearm"), bFired2);
+	TestTrue(TEXT("Banner re-latches on second silence spell"), Runner.IsSilenceWarningActive());
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FClaudeCodeRunner_Watchdog_DiagnosticResetsOnLaunch,
+	"UnrealClaude.SilenceWatchdog.Watchdog.DiagnosticResetsOnLaunch",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter
+)
+
+bool FClaudeCodeRunner_Watchdog_DiagnosticResetsOnLaunch::RunTest(const FString& Parameters)
+{
+	FClaudeCodeRunner Runner;
+	Runner.TestOnly_ResetWatchdogLatches();
+	SetRunnerSilenceSeconds(Runner, 75.0);
+	Runner.TestOnly_MaybeFireSilenceWatchdog(FPlatformTime::Seconds());
+
+	// Simulate a new subprocess launch — latches must reset
+	Runner.TestOnly_ResetWatchdogLatches();
+
+	SetRunnerSilenceSeconds(Runner, 75.0);
+	const bool bFiredAfterReset = Runner.TestOnly_MaybeFireSilenceWatchdog(FPlatformTime::Seconds());
+	TestTrue(TEXT("Diagnostic fires again after launch reset"), bFiredAfterReset);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

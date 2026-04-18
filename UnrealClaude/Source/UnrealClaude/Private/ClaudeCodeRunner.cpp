@@ -1113,8 +1113,43 @@ FString FClaudeCodeRunner::BuildHangDiagnostic(
 		*PayloadHead, *PayloadTail, *BufferTail);
 }
 
-// Stub — replaced in Task 3
-bool FClaudeCodeRunner::MaybeFireSilenceWatchdog(double) { return false; }
+bool FClaudeCodeRunner::MaybeFireSilenceWatchdog(double NowPlatformSeconds)
+{
+	const int64 LastMillis = LastPipeActivityMillis.Load();
+	if (LastMillis == 0)
+	{
+		// No subprocess activity recorded yet — nothing to evaluate
+		return false;
+	}
+	const double SilenceSec = NowPlatformSeconds - (static_cast<double>(LastMillis) / 1000.0);
+
+	if (SilenceSec < SilenceWarningThresholdSeconds)
+	{
+		return false;
+	}
+
+	// Banner latch: set unconditionally when over threshold. RecordPipeActivity clears it.
+	bSilenceBannerLatched.Store(true);
+
+	// Diagnostic latch: one-shot per session.
+	bool bExpected = false;
+	const bool bWonTheRace = bHangDiagnosticLogged.CompareExchange(bExpected, true);
+	if (!bWonTheRace)
+	{
+		// Diagnostic already logged this session
+		return false;
+	}
+
+	// We won the race — log the diagnostic. Real wiring to MCP queue + payload snapshot
+	// comes in Task 4; for now pass empty strings / zero counts so the test path works.
+	const FString Diag = BuildHangDiagnostic(
+		SilenceSec,
+		FPlatformProcess::IsProcRunning(ProcessHandle),
+		FString(), FString(),
+		0, 0, 0);
+	UE_LOG(LogTemp, Warning, TEXT("%s"), *Diag);
+	return true;
+}
 
 bool FClaudeCodeRunner::CreateProcessPipes()
 {
