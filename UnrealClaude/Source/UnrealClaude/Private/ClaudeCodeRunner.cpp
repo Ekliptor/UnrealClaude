@@ -1069,7 +1069,17 @@ double FClaudeCodeRunner::GetSilenceSeconds() const
 
 bool FClaudeCodeRunner::IsSilenceWarningActive() const
 {
-	return bSilenceBannerLatched.Load();
+	// Compute from the timestamp directly rather than relying on bSilenceBannerLatched.
+	// The latch is only set by MaybeFireSilenceWatchdog, which runs on the worker thread's
+	// read loop — but the subprocess can hang BEFORE the read loop starts (e.g. stdin
+	// WritePipe blocks when the child isn't reading stdin fast enough). By computing
+	// silence here on every game-thread Slate tick we catch those pre-read-loop hangs too.
+	// LastPipeActivityMillis is seeded in LaunchProcess, so it's valid from process start.
+	if (LastPipeActivityMillis.Load() == 0)
+	{
+		return false;
+	}
+	return GetSilenceSeconds() >= SilenceWarningThresholdSeconds;
 }
 
 void FClaudeCodeRunner::RecordPipeActivity()
