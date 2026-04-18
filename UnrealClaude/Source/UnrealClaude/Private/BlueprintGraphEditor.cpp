@@ -217,6 +217,22 @@ UEdGraphNode* FBlueprintGraphEditor::FindNodeById(UEdGraph* Graph, const FString
 		}
 	}
 
+	// Fallback: match against the node's native NodeGuid so pre-existing nodes
+	// (created by the user or Engine, not by MCP) are also reachable by ID.
+	// blueprint_query returns node_guid values for every node — this lets modify
+	// ops (delete_node, connect_nodes, set_pin_default) accept the same IDs.
+	FGuid ParsedGuid;
+	if (FGuid::Parse(NodeId, ParsedGuid))
+	{
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (Node && Node->NodeGuid == ParsedGuid)
+			{
+				return Node;
+			}
+		}
+	}
+
 	return nullptr;
 }
 

@@ -144,13 +144,27 @@ bool FAnimGraphEditor::ClearStateGraph(UEdGraph* StateGraph, FString& OutError)
 
 UEdGraphNode* FAnimGraphEditor::FindNodeById(UEdGraph* Graph, const FString& NodeId)
 {
-	if (!Graph) return nullptr;
+	if (!Graph || NodeId.IsEmpty()) return nullptr;
 
 	for (UEdGraphNode* Node : Graph->Nodes)
 	{
 		if (GetNodeId(Node) == NodeId)
 		{
 			return Node;
+		}
+	}
+
+	// Fallback: match against the native NodeGuid so pre-existing nodes
+	// (not created by MCP) are also reachable by ID for modify ops.
+	FGuid ParsedGuid;
+	if (FGuid::Parse(NodeId, ParsedGuid))
+	{
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (Node && Node->NodeGuid == ParsedGuid)
+			{
+				return Node;
+			}
 		}
 	}
 
