@@ -345,6 +345,10 @@ If Claude says the MCP tools are in its instructions but not in its function lis
 
 4. **Restart the editor**: After installing npm dependencies, restart Unreal Editor.
 
+### Request Hangs 
+
+New watchdog should warn about hung requests (60s). Make sure all files are on disk (DISABLE OneDrive, DropBox, etc.)
+
 ### Debugging the MCP Bridge
 
 The MCP bridge is also available as a [standalone repository](https://github.com/Natfii/ue5-mcp-bridge) with its own Vitest test suite. If you're experiencing bridge-level issues (tool listing, parameter translation, context injection), you can run the bridge tests independently:
