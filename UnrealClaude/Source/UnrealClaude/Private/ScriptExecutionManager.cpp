@@ -3,6 +3,7 @@
 #include "ScriptExecutionManager.h"
 #include "ScriptPermissionDialog.h"
 #include "UnrealClaudeModule.h"
+#include "UnrealClaudeSettings.h"
 #include "UnrealClaudeUtils.h"
 #include "JsonUtils.h"
 #include "MCP/MCPParamValidator.h"
@@ -12,6 +13,7 @@
 #include "HAL/FileManager.h"
 #include "HAL/PlatformFileManager.h"
 #include "Editor.h"
+#include "Engine/Level.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 
@@ -19,6 +21,189 @@
 #if WITH_LIVE_CODING
 #include "ILiveCodingModule.h"
 #endif
+
+namespace
+{
+	/**
+	 * Verify the editor world is in a state where TActorIterator can traverse
+	 * it without crashing. The iterator dereferences UWorld::GetLevels() and
+	 * each ULevel in turn; if the world is mid-transition (map load, GC,
+	 * streaming level swap, PIE teardown) any of these can be null/unreachable.
+	 */
+	bool IsWorldSafeToIterate(UWorld* World)
+	{
+		if (!IsValid(World)) return false;
+		if (World->IsUnreachable()) return false;
+		if (!World->bIsWorldInitialized) return false;
+		if (World->PersistentLevel == nullptr) return false;
+		if (!IsValid(World->PersistentLevel)) return false;
+		if (World->GetLevels().Num() == 0) return false;
+		for (const ULevel* L : World->GetLevels())
+		{
+			if (!IsValid(L)) return false;
+		}
+		return true;
+	}
+
+	/** Count actors defensively; returns -1 when the world is not safe to iterate. */
+	int32 CountActorsSafely(UWorld* World)
+	{
+		if (!IsWorldSafeToIterate(World)) return -1;
+		int32 N = 0;
+		for (TActorIterator<AActor> It(World); It; ++It) { ++N; }
+		return N;
+	}
+
+	/**
+	 * Best-effort parse of a Python traceback out of captured script output.
+	 * Tolerant of Unreal GLog prefixes (timestamps/categories) by matching on substrings
+	 * rather than anchoring to line starts. Leaves outputs untouched on failure.
+	 */
+	void ParsePythonTraceback(
+		const FString& CombinedOutput,
+		const FString& ScriptFilePath,
+		FString& OutErrorType,
+		int32& OutErrorLine,
+		FString& OutErrorMessage)
+	{
+		if (CombinedOutput.IsEmpty())
+		{
+			return;
+		}
+
+		TArray<FString> Lines;
+		CombinedOutput.ParseIntoArrayLines(Lines, /*bCullEmpty=*/false);
+
+		// --- Pass 1: find the deepest-relevant "File "<path>", line <N>" frame ---
+		// Prefer the last frame whose path equals the user's script; fall back to the last frame found.
+		int32 LastAnyLine = 0;
+		int32 LastScriptLine = 0;
+		for (const FString& Line : Lines)
+		{
+			int32 FileIdx = Line.Find(TEXT("File \""));
+			if (FileIdx == INDEX_NONE)
+			{
+				continue;
+			}
+			int32 PathStart = FileIdx + 6; // after `File "`
+			int32 PathEnd = Line.Find(TEXT("\""), ESearchCase::CaseSensitive, ESearchDir::FromStart, PathStart);
+			if (PathEnd == INDEX_NONE)
+			{
+				continue;
+			}
+			FString FramePath = Line.Mid(PathStart, PathEnd - PathStart);
+
+			int32 LineTok = Line.Find(TEXT("line "), ESearchCase::IgnoreCase, ESearchDir::FromStart, PathEnd);
+			if (LineTok == INDEX_NONE)
+			{
+				continue;
+			}
+			int32 NumStart = LineTok + 5;
+			int32 NumEnd = NumStart;
+			while (NumEnd < Line.Len() && FChar::IsDigit(Line[NumEnd]))
+			{
+				NumEnd++;
+			}
+			if (NumEnd == NumStart)
+			{
+				continue;
+			}
+			int32 Parsed = FCString::Atoi(*Line.Mid(NumStart, NumEnd - NumStart));
+			if (Parsed <= 0)
+			{
+				continue;
+			}
+
+			LastAnyLine = Parsed;
+			if (!ScriptFilePath.IsEmpty() && FramePath.Equals(ScriptFilePath, ESearchCase::IgnoreCase))
+			{
+				LastScriptLine = Parsed;
+			}
+		}
+		OutErrorLine = (LastScriptLine > 0) ? LastScriptLine : LastAnyLine;
+
+		// --- Pass 2: find the final "<ExceptionName>: <message>" fragment ---
+		// Walk bottom-up. For each line scan ALL `:` positions (Unreal prefixes GLog lines
+		// with things like `LogPython: Error:` so the first colon is rarely the exception).
+		// Pick the rightmost colon whose preceding identifier looks like a Python exception class.
+		auto LooksLikeException = [](const FString& Ident) -> bool
+		{
+			if (Ident.IsEmpty() || !FChar::IsUpper(Ident[0]))
+			{
+				return false;
+			}
+			return Ident.EndsWith(TEXT("Error")) ||
+				Ident.EndsWith(TEXT("Exception")) ||
+				Ident.EndsWith(TEXT("Warning")) ||
+				Ident.EndsWith(TEXT("Interrupt")) ||
+				Ident.EndsWith(TEXT("Exit")) ||
+				Ident.Equals(TEXT("NotImplemented")) ||
+				Ident.Equals(TEXT("StopIteration")) ||
+				Ident.Equals(TEXT("StopAsyncIteration"));
+		};
+
+		for (int32 i = Lines.Num() - 1; i >= 0 && OutErrorType.IsEmpty(); --i)
+		{
+			FString Line = Lines[i];
+			Line.TrimStartAndEndInline();
+			if (Line.IsEmpty())
+			{
+				continue;
+			}
+
+			// Scan colons right-to-left so qualified names (e.g. `builtins.NameError:`) and
+			// log-prefixed lines (`LogPython: Error: NameError: …`) both resolve to the right token.
+			for (int32 ColonIdx = Line.Len() - 1; ColonIdx > 0; --ColonIdx)
+			{
+				if (Line[ColonIdx] != TEXT(':'))
+				{
+					continue;
+				}
+
+				int32 IdStart = ColonIdx;
+				while (IdStart > 0)
+				{
+					const TCHAR C = Line[IdStart - 1];
+					if (FChar::IsAlnum(C) || C == TEXT('_') || C == TEXT('.'))
+					{
+						IdStart--;
+					}
+					else
+					{
+						break;
+					}
+				}
+				if (IdStart >= ColonIdx)
+				{
+					continue;
+				}
+
+				FString Ident = Line.Mid(IdStart, ColonIdx - IdStart);
+				// Strip qualifier prefix (e.g. "builtins.NameError" → "NameError").
+				int32 DotIdx;
+				if (Ident.FindLastChar(TEXT('.'), DotIdx))
+				{
+					Ident = Ident.Mid(DotIdx + 1);
+				}
+				if (!LooksLikeException(Ident))
+				{
+					continue;
+				}
+
+				FString Message = Line.Mid(ColonIdx + 1);
+				Message.TrimStartAndEndInline();
+				if (Message.IsEmpty())
+				{
+					continue;
+				}
+
+				OutErrorType = Ident;
+				OutErrorMessage = Message;
+				break;
+			}
+		}
+	}
+}
 
 FScriptExecutionManager& FScriptExecutionManager::Get()
 {
@@ -58,8 +243,23 @@ FScriptExecutionResult FScriptExecutionManager::ExecuteScript(
 		FinalDescription = ScriptHeader::ParseDescription(ScriptContent);
 	}
 
-	// Show permission dialog
-	if (!ShowPermissionDialog(ScriptContent, Type, FinalDescription))
+	// Check per-type auto-approve setting; fall back to modal dialog
+	const UUnrealClaudeSettings* Settings = GetDefault<UUnrealClaudeSettings>();
+	bool bAutoApproved = false;
+	switch (Type)
+	{
+		case EScriptType::Python:  bAutoApproved = Settings->bAutoApprovePythonScriptExecution; break;
+		case EScriptType::Console: bAutoApproved = Settings->bAutoApproveConsoleScriptExecution; break;
+		case EScriptType::Cpp:     bAutoApproved = Settings->bAutoApproveCppScriptExecution; break;
+		default: break;
+	}
+
+	if (bAutoApproved)
+	{
+		UE_LOG(LogUnrealClaude, Log, TEXT("Auto-approved %s script (per UnrealClaudeSettings): %s"),
+			*ScriptTypeToString(Type), *FinalDescription);
+	}
+	else if (!ShowPermissionDialog(ScriptContent, Type, FinalDescription))
 	{
 		return FScriptExecutionResult::Error(TEXT("Script execution denied by user"));
 	}
@@ -303,6 +503,13 @@ FScriptExecutionResult FScriptExecutionManager::ExecutePython(
 	{
 		return FScriptExecutionResult::Error(TEXT("No active world"));
 	}
+	if (!IsWorldSafeToIterate(World))
+	{
+		// Editor is mid-map-load / GC / streaming — TActorIterator would crash.
+		return FScriptExecutionResult::Error(TEXT(
+			"Editor world is not ready (map loading, streaming, or GC in progress). "
+			"Wait a moment and retry."));
+	}
 
 	// Write script to file
 	FString ScriptName = GenerateScriptName(EScriptType::Python, Description);
@@ -313,12 +520,8 @@ FScriptExecutionResult FScriptExecutionManager::ExecutePython(
 		return FScriptExecutionResult::Error(TEXT("Failed to write Python script file"));
 	}
 
-	// Count actors before execution for validation
-	int32 ActorCountBefore = 0;
-	for (TActorIterator<AActor> It(World); It; ++It)
-	{
-		ActorCountBefore++;
-	}
+	// Count actors before execution for validation (negative on unsafe world).
+	const int32 ActorCountBefore = CountActorsSafely(World);
 
 	// Execute via console command
 	FString Command = FString::Printf(TEXT("py \"%s\""), *FilePath);
@@ -345,13 +548,13 @@ FScriptExecutionResult FScriptExecutionManager::ExecutePython(
 		Output += LogText;
 	}
 
-	// Count actors after execution
-	int32 ActorCountAfter = 0;
-	for (TActorIterator<AActor> It(World); It; ++It)
-	{
-		ActorCountAfter++;
-	}
-	int32 ActorsCreated = ActorCountAfter - ActorCountBefore;
+	// Count actors after execution — the script itself may have destroyed the
+	// world (e.g. loaded a new map), so re-query and guard.
+	UWorld* WorldAfter = GEditor->GetEditorWorldContext().World();
+	const int32 ActorCountAfter = CountActorsSafely(WorldAfter);
+	const int32 ActorsCreated = (ActorCountBefore >= 0 && ActorCountAfter >= 0)
+		? ActorCountAfter - ActorCountBefore
+		: 0;
 
 	UE_LOG(LogUnrealClaude, Log, TEXT("Python script output (%d chars): %s"),
 		Output.Len(), Output.Len() > 500 ? *(Output.Left(500) + TEXT("...")) : *Output);
@@ -393,7 +596,15 @@ FScriptExecutionResult FScriptExecutionManager::ExecutePython(
 	}
 	else if (!bHasError)
 	{
-		FullOutput += TEXT("\n[WARNING: Script reported success but no new actors were created in the level. The script may have failed silently.]");
+		const bool bLooksLikeSpawnScript =
+			ScriptContent.Contains(TEXT("spawn_actor")) ||
+			ScriptContent.Contains(TEXT("SpawnActor")) ||
+			ScriptContent.Contains(TEXT("spawn_object"));
+
+		if (bLooksLikeSpawnScript)
+		{
+			FullOutput += TEXT("\n[WARNING: Script appears to spawn actors but no new actors were created in the level. The script may have failed silently.]");
+		}
 	}
 
 	// Add to history
@@ -408,7 +619,9 @@ FScriptExecutionResult FScriptExecutionManager::ExecutePython(
 
 	if (bHasError)
 	{
-		return FScriptExecutionResult::Error(ResultMessage, FullOutput);
+		FScriptExecutionResult Result = FScriptExecutionResult::Error(ResultMessage, FullOutput);
+		ParsePythonTraceback(Output, FilePath, Result.ErrorType, Result.ErrorLine, Result.ErrorMessage);
+		return Result;
 	}
 
 	return FScriptExecutionResult::Success(ResultMessage, FullOutput);

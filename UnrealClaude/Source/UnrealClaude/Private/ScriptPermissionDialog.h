@@ -39,7 +39,9 @@ private:
 		const FString& DisplayPreview,
 		const FString& TypeStr,
 		const FString& Description,
+		EScriptType Type,
 		TSharedPtr<bool> bApprovedPtr,
+		TSharedPtr<bool> bRememberPtr,
 		TSharedPtr<class SWindow> Window);
 
 	/** Build the header section with warning and description */
@@ -50,8 +52,15 @@ private:
 	/** Build the script preview section */
 	static TSharedRef<class SWidget> BuildPreviewSection(const FString& DisplayPreview);
 
+	/** Build the "remember this choice" checkbox row */
+	static TSharedRef<class SWidget> BuildRememberRow(
+		const FString& TypeStr,
+		TSharedPtr<bool> bRememberPtr);
+
 	/** Build the button bar */
 	static TSharedRef<class SWidget> BuildButtonBar(
+		EScriptType Type,
 		TSharedPtr<bool> bApprovedPtr,
+		TSharedPtr<bool> bRememberPtr,
 		TSharedPtr<class SWindow> Window);
 };

@@ -143,22 +143,34 @@ FMCPToolResult FMCPTool_ExecuteScript::ExecuteSync(const TSharedRef<FJsonObject>
 			Result.Output.IsEmpty() ? Result.ErrorOutput : Result.Output);
 		ResultData->SetStringField(TEXT("error"), Result.ErrorOutput);
 
-		// Classify error type for easier handling
-		FString ErrorType = TEXT("execution_error");
+		// Coarse classification (was `error_type` pre-speedup-#3; kept for broad branching).
+		FString ErrorCategory = TEXT("execution_error");
 		if (ScriptTypeStr.ToLower() == TEXT("cpp"))
 		{
-			ErrorType = TEXT("compile_error");
+			ErrorCategory = TEXT("compile_error");
 		}
 		else if (Result.ErrorOutput.Contains(TEXT("SyntaxError")) ||
 				 Result.ErrorOutput.Contains(TEXT("IndentationError")))
 		{
-			ErrorType = TEXT("syntax_error");
+			ErrorCategory = TEXT("syntax_error");
 		}
 		else if (Result.ErrorOutput.Contains(TEXT("Traceback")))
 		{
-			ErrorType = TEXT("runtime_error");
+			ErrorCategory = TEXT("runtime_error");
 		}
-		ResultData->SetStringField(TEXT("error_type"), ErrorType);
+		ResultData->SetStringField(TEXT("error_category"), ErrorCategory);
+
+		// Structured fields parsed once on the Unreal side so Claude doesn't re-regex the stderr.
+		ResultData->SetStringField(TEXT("error_type"),
+			Result.ErrorType.IsEmpty() ? ErrorCategory : Result.ErrorType);
+		if (Result.ErrorLine > 0)
+		{
+			ResultData->SetNumberField(TEXT("error_line"), Result.ErrorLine);
+		}
+		if (!Result.ErrorMessage.IsEmpty())
+		{
+			ResultData->SetStringField(TEXT("error_message"), Result.ErrorMessage);
+		}
 
 		// Return error with detailed info for auto-retry
 		FMCPToolResult ErrorResult;

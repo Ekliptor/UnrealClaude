@@ -8,6 +8,8 @@ Build/
 CleanPlugin/
 PluginBuild/
 Tutorials/
+BuiltPlugin/
+docs/
 
 # IDE files
 .vs/

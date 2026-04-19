@@ -32,7 +32,8 @@ public class UnrealClaude : ModuleRules
 				"ToolMenus",
 				"Projects",
 				"EditorFramework",
-				"WorkspaceMenuStructure"
+				"WorkspaceMenuStructure",
+				"DeveloperSettings"
 			}
 		);
 			

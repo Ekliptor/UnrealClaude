@@ -258,9 +258,19 @@ struct FScriptExecutionResult
 	/** Number of retry attempts made */
 	int32 RetryCount;
 
+	/** Parsed Python exception class name, e.g. "NameError". Empty when not parseable. */
+	FString ErrorType;
+
+	/** Line number in the user's script where the exception occurred. 0 if unknown. */
+	int32 ErrorLine;
+
+	/** Parsed exception message (text after `ErrorType:` on the final traceback line). */
+	FString ErrorMessage;
+
 	FScriptExecutionResult()
 		: bSuccess(false)
 		, RetryCount(0)
+		, ErrorLine(0)
 	{}
 
 	static FScriptExecutionResult Success(const FString& InMessage, const FString& InOutput = TEXT(""))

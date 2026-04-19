@@ -62,6 +62,21 @@ When performing complex Unreal tasks, use parallel MCP tool calls and subagents 
 - Lead agent surveys first (read-only), plans names, spawns subagents, verifies results
 - NEVER spawn more than 3 subagents — the task queue limit is 4 concurrent tasks total
 
+### execute_script Error Payload
+
+When `execute_script` fails, the JSON `data` payload carries structured error fields — **read these first instead of regexing the `output`/`error` strings**:
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `error_type` | string | Python exception class (`NameError`, `TypeError`, `SyntaxError`, …). For C++ compile failures or unparseable output, falls back to the coarse category value. Always present on failure. |
+| `error_line` | int | Line number inside the submitted script where the exception was raised. Omitted when unknown. |
+| `error_message` | string | Exception message (the text after `ErrorType:`). Omitted when unparseable. |
+| `error_category` | string | Coarse bucket: `syntax_error`, `runtime_error`, `compile_error`, or `execution_error`. Always present on failure. |
+| `error` | string | Full stderr/traceback blob. Use only when the structured fields aren't enough. |
+| `output` | string | Combined stdout + log output. |
+
+Prefer branching on `error_type` + `error_line` to decide how to fix the script. Only fall back to parsing `error` / `output` when the structured fields are missing.
+
 ### Key Directories
 - `Source/UnrealClaude/Private/MCP/` - MCP server and tool implementations
 - `Source/UnrealClaude/Private/MCP/Tools/` - Individual MCP tools

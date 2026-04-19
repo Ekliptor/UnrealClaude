@@ -2,10 +2,12 @@
 
 #include "ScriptPermissionDialog.h"
 #include "UnrealClaudeModule.h"
+#include "UnrealClaudeSettings.h"
 
 #include "Widgets/SWindow.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Framework/Application/SlateApplication.h"
@@ -24,6 +26,7 @@ bool FScriptPermissionDialog::Show(
 
 	// Use shared pointer for approval state to avoid stack variable capture issues
 	TSharedPtr<bool> bApprovedPtr = MakeShared<bool>(false);
+	TSharedPtr<bool> bRememberPtr = MakeShared<bool>(false);
 
 	// Truncate preview if too long
 	FString DisplayPreview = ScriptPreview;
@@ -43,7 +46,7 @@ bool FScriptPermissionDialog::Show(
 
 	// Build and set content
 	PermissionWindow->SetContent(
-		BuildContent(DisplayPreview, TypeStr, Description, bApprovedPtr, PermissionWindow)
+		BuildContent(DisplayPreview, TypeStr, Description, Type, bApprovedPtr, bRememberPtr, PermissionWindow)
 	);
 
 	// Show as modal and wait for user response
@@ -56,7 +59,9 @@ TSharedRef<SWidget> FScriptPermissionDialog::BuildContent(
 	const FString& DisplayPreview,
 	const FString& TypeStr,
 	const FString& Description,
+	EScriptType Type,
 	TSharedPtr<bool> bApprovedPtr,
+	TSharedPtr<bool> bRememberPtr,
 	TSharedPtr<SWindow> Window)
 {
 	return SNew(SVerticalBox)
@@ -73,13 +78,20 @@ TSharedRef<SWidget> FScriptPermissionDialog::BuildContent(
 		[
 			BuildPreviewSection(DisplayPreview)
 		]
+		// Remember-this-choice checkbox
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(10, 0)
+		[
+			BuildRememberRow(TypeStr, bRememberPtr)
+		]
 		// Buttons
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.HAlign(HAlign_Right)
 		.Padding(10)
 		[
-			BuildButtonBar(bApprovedPtr, Window)
+			BuildButtonBar(Type, bApprovedPtr, bRememberPtr, Window)
 		];
 }
 
@@ -124,8 +136,55 @@ TSharedRef<SWidget> FScriptPermissionDialog::BuildPreviewSection(const FString& 
 		];
 }
 
+TSharedRef<SWidget> FScriptPermissionDialog::BuildRememberRow(
+	const FString& TypeStr,
+	TSharedPtr<bool> bRememberPtr)
+{
+	const FString Label = FString::Printf(
+		TEXT("Remember this choice for future %s scripts (also editable in Editor Preferences > Plugins > UnrealClaude)"),
+		*TypeStr);
+
+	return SNew(SCheckBox)
+		.IsChecked(ECheckBoxState::Unchecked)
+		.OnCheckStateChanged_Lambda([bRememberPtr](ECheckBoxState NewState) {
+			*bRememberPtr = (NewState == ECheckBoxState::Checked);
+		})
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(Label))
+			.AutoWrapText(true)
+		];
+}
+
+namespace
+{
+	void ApplyRememberedChoice(EScriptType Type, bool bApproved)
+	{
+		UUnrealClaudeSettings* Settings = GetMutableDefault<UUnrealClaudeSettings>();
+		if (!Settings)
+		{
+			return;
+		}
+
+		switch (Type)
+		{
+			case EScriptType::Python:  Settings->bAutoApprovePythonScriptExecution = bApproved; break;
+			case EScriptType::Console: Settings->bAutoApproveConsoleScriptExecution = bApproved; break;
+			case EScriptType::Cpp:     Settings->bAutoApproveCppScriptExecution = bApproved; break;
+			default: return;
+		}
+
+		Settings->SaveConfig();
+
+		UE_LOG(LogUnrealClaude, Log, TEXT("Remembered choice for %s scripts: auto-approve = %s"),
+			*ScriptTypeToString(Type), bApproved ? TEXT("true") : TEXT("false"));
+	}
+}
+
 TSharedRef<SWidget> FScriptPermissionDialog::BuildButtonBar(
+	EScriptType Type,
 	TSharedPtr<bool> bApprovedPtr,
+	TSharedPtr<bool> bRememberPtr,
 	TSharedPtr<SWindow> Window)
 {
 	return SNew(SHorizontalBox)
@@ -135,8 +194,12 @@ TSharedRef<SWidget> FScriptPermissionDialog::BuildButtonBar(
 		[
 			SNew(SButton)
 			.Text(FText::FromString(TEXT("Allow")))
-			.OnClicked_Lambda([bApprovedPtr, Window]() {
+			.OnClicked_Lambda([Type, bApprovedPtr, bRememberPtr, Window]() {
 				*bApprovedPtr = true;
+				if (*bRememberPtr)
+				{
+					ApplyRememberedChoice(Type, true);
+				}
 				if (Window.IsValid())
 				{
 					Window->RequestDestroyWindow();
@@ -149,8 +212,12 @@ TSharedRef<SWidget> FScriptPermissionDialog::BuildButtonBar(
 		[
 			SNew(SButton)
 			.Text(FText::FromString(TEXT("Deny")))
-			.OnClicked_Lambda([bApprovedPtr, Window]() {
+			.OnClicked_Lambda([Type, bApprovedPtr, bRememberPtr, Window]() {
 				*bApprovedPtr = false;
+				if (*bRememberPtr)
+				{
+					ApplyRememberedChoice(Type, false);
+				}
 				if (Window.IsValid())
 				{
 					Window->RequestDestroyWindow();
